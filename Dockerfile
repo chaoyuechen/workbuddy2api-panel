@@ -1,4 +1,4 @@
-FROM golang:1.26.10-alpine AS build
+FROM --platform=$BUILDPLATFORM golang:1.26.10-alpine AS build
 # Go module 代理：默认官方源（境外/CI 不多绕一跳）；境内或镜像环境用
 # --build-arg 覆盖，容器内直连 proxy.golang.org 在境内会长时间卡住：
 #   docker compose build --build-arg GOPROXY=https://goproxy.cn,direct
@@ -7,15 +7,21 @@ FROM golang:1.26.10-alpine AS build
 ARG GOPROXY=https://proxy.golang.org,direct
 ENV GOPROXY=${GOPROXY}
 WORKDIR /src
-COPY go.mod ./
+COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG APP_VERSION=dev
+ARG TARGETOS
+ARG TARGETARCH
+ARG TARGETVARIANT
+# 构建阶段使用宿主架构，避免在 QEMU 内运行 Go 编译器；ARMv7 显式设置 GOARM=7。
 # 一次编译全部二进制（工具进镜像，容器内可直接跑脚本）。全部 -trimpath -s -w。
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.appVersion=${APP_VERSION}" -o /out/wb2api ./cmd/server \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/login ./cmd/login \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/credit ./cmd/credit
+RUN export CGO_ENABLED=0 GOOS="${TARGETOS}" GOARCH="${TARGETARCH}" \
+ && if [ "$TARGETARCH" = "arm" ]; then export GOARM="${TARGETVARIANT#v}"; fi \
+ && go build -trimpath -ldflags="-s -w -X main.appVersion=${APP_VERSION}" -o /out/wb2api ./cmd/server \
+ && go build -trimpath -ldflags="-s -w" -o /out/signin_bin ./cmd/signin \
+ && go build -trimpath -ldflags="-s -w" -o /out/login ./cmd/login \
+ && go build -trimpath -ldflags="-s -w" -o /out/credit ./cmd/credit
 
 FROM alpine:3.20
 # python3：login.sh 的 JSON 解析 / 签到 / 落盘；bash：shell 脚本体。

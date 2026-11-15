@@ -1,9 +1,9 @@
 name: docker-ghcr
 
-# 多架构镜像（amd64/arm64）自动构建并发布到 ghcr.io：
+# 多架构镜像（amd64/arm64/armv7）自动构建并发布到 ghcr.io：
 #   - push 到 main / 打 v* tag / 手动触发 → 构建并推送
 #   - PR 触碰构建相关文件 → 仅构建验证，不推送
-# tag 说明：main 推 latest + main + sha-xxxxxx；时间标签 v2026.9.26.711 推同名镜像 tag
+# tag 说明：main 推 latest + main + sha-xxxxxx；时间标签 v2026.9.26.711 推镜像 tag 2026.9.26.711
 on:
   push:
     branches: [main]
@@ -26,15 +26,15 @@ on:
       - ".github/workflows/docker-ghcr.yml"
   workflow_dispatch:
 
-# 并发组：PR 取消过时构建；main/tag 按引用串行——发版时 main+tag 同推不再双跑
-# 同一份代码的多架构构建（QEMU arm64 一次不便宜）。
+# 并发组：PR 取消过时构建；main/tag 同一引用内串行，不互相取消。
+# main 与版本标签仍分别构建，以便发布各自的镜像 tag。
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
   REGISTRY: ghcr.io
-  # github.repository 自动小写化，得到 ghcr.io/misakano7545/workbuddy2api-panel
+  # 跟随当前仓库（含 fork）；metadata-action 会把镜像名转换成小写。
   IMAGE_NAME: ${{ github.repository }}
 
 jobs:
@@ -47,8 +47,10 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Set up QEMU（arm64 交叉模拟）
+      - name: Set up QEMU（arm64 / ARMv7 运行阶段）
         uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64,arm
 
       - name: Set up Buildx
         uses: docker/setup-buildx-action@v3
@@ -84,7 +86,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64
+          platforms: linux/amd64,linux/arm64,linux/arm/v7
           build-args: APP_VERSION=${{ env.APP_VERSION }}
           push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
