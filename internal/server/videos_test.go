@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/misakano7545/workbuddy2api-panel/internal/auth"
+	"github.com/misakano7545/workbuddy2api-panel/internal/reqlog"
 	"github.com/misakano7545/workbuddy2api-panel/internal/upstream"
 )
 
@@ -159,6 +160,37 @@ func TestVideoUpstreamBody(t *testing.T) {
 	got2, _ := videoUpstreamBody(map[string]any{"prompt": "x", "watermark": false}, "m")
 	if got2["watermark"] != false {
 		t.Fatalf("显式 watermark=false 被覆盖了：%v", got2)
+	}
+}
+
+// TestVideoUpstreamReferenceMaterials 参考素材必须是对象数组（上游 []*v2.ReferenceImages）：
+// 字符串条目补成 {image_url|video_url|audio_url}，已是对象的取对应键或 url，
+// 转不出来的条目丢掉——但原始字段不能漏到尾部透传里。
+func TestVideoUpstreamReferenceMaterials(t *testing.T) {
+	var req map[string]any
+	body := `{"prompt":"x","reference_images":["https://a/1.png",{"image_url":"https://a/2.png"},""],
+	          "reference_videos":["https://a/1.mp4",{"url":"https://a/2.mp4"},{"audio_url":"错键"}],
+	          "reference_audios":"https://a/1.wav","seed":7}`
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("bad fixture: %v", err)
+	}
+	got, err := videoUpstreamBody(req, "m")
+	if err != nil {
+		t.Fatalf("videoUpstreamBody: %v", err)
+	}
+	imgs, _ := got["reference_images"].([]map[string]any)
+	if len(imgs) != 2 || imgs[0]["image_url"] != "https://a/1.png" || imgs[1]["image_url"] != "https://a/2.png" {
+		t.Fatalf("reference_images 应转成 2 条对象（空串丢掉）：%v", got["reference_images"])
+	}
+	vids, _ := got["reference_videos"].([]map[string]any)
+	if len(vids) != 2 || vids[1]["video_url"] != "https://a/2.mp4" {
+		t.Fatalf("video_url 认键失败或错键条目没丢：%v", got["reference_videos"])
+	}
+	if _, ok := got["reference_audios"]; ok {
+		t.Fatalf("非数组的 reference_audios 必须丢掉，不能原样透传：%v", got["reference_audios"])
+	}
+	if got["seed"] != float64(7) {
+		t.Fatalf("未知字段仍应透传：%v", got)
 	}
 }
 
@@ -477,5 +509,58 @@ func TestVideoRepeatPollKeepsUsage(t *testing.T) {
 	st, _ := h.cfg.Pool.Status("c1")
 	if len(st.ModelCosts) != 1 || st.ModelCosts[0].Samples != 1 {
 		t.Fatalf("应只记一次账：%+v", st.ModelCosts)
+	}
+}
+
+// TestVideosRecordedInPanel 出片必须进面板可见的请求台账（issue #249）。
+//
+// POST /v1/videos 与 /v1/videos/generations 是同一个 handler，此前只有后者登记在
+// isChatEntry 里：走标准 OpenAI Videos 路径的客户端因此没有 X-Request-Id、不入 JSONL
+// 归档，面板「请求记录」看不到这笔视频积分，控制台行也在 effort 处就结束（没有
+// rid/out/try/credit 段）——用户看到的就是「生视频不统计积分」。
+func TestVideosRecordedInPanel(t *testing.T) {
+	fastVideoPoll(t)
+	f := &videoFake{on: func(c videoCall) (int, string) {
+		switch c.Path {
+		case "/v2/videos/generations":
+			return 200, videoSubmitOK
+		case "/v2/videos/tasks":
+			return 200, videoTaskDone
+		}
+		return 404, `{"code":404,"msg":"unexpected"}`
+	}}
+	reqLog := reqlog.New(reqlog.Config{})
+	h := NewHandler(Config{
+		Pool:             imagePool(),
+		Upstream:         f.client(),
+		RequestLog:       reqLog,
+		RecordClientInfo: true,
+	})
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/v1/videos", strings.NewReader(`{"prompt":"一只猫","seconds":4}`))
+	req.Header.Set("X-Forwarded-For", "203.0.113.9, 10.0.0.1")
+	req.Header.Set("User-Agent", "test-video/1.0")
+	h.ServeHTTP(rec, req)
+
+	if rec.Code != 200 {
+		t.Fatalf("code=%d body=%s", rec.Code, rec.Body)
+	}
+	if got := rec.Header().Get("X-Request-Id"); !strings.HasPrefix(got, "req-") {
+		t.Fatalf("POST /v1/videos 也应有 X-Request-Id，实际 %q", got)
+	}
+	s := reqLog.Snapshot()
+	if len(s.Recent) != 1 {
+		t.Fatalf("请求台账应记 1 条，实际 %d 条：%+v", len(s.Recent), s.Recent)
+	}
+	e := s.Recent[0]
+	if e.Path != "/v1/videos" || e.Model != "minimax-video-h3" || !e.OK {
+		t.Fatalf("事件 path/model/ok 不对：%+v", e)
+	}
+	if e.Account == "" || e.Credit != 57.14 || e.TotalTokens != 200000 {
+		t.Fatalf("事件应带账号与上游用量（credit/tokens）：%+v", e)
+	}
+	if e.ClientIP == "" || !strings.Contains(e.UserAgent, "test-video") {
+		t.Fatalf("事件应带来源（IP/UA）：%+v", e)
 	}
 }
