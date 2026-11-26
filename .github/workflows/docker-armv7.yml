@@ -1,0 +1,84 @@
+name: docker-armv7
+
+# 只构建 linux/arm/v7（32 位 ARM）；amd64 / arm64 直接用上游镜像：
+#   ghcr.io/misakano7545/workbuddy2api-panel
+#
+# 代码来源：上游 misakano7545/workbuddy2api-panel 的 main 分支（本 fork 不再同步上游）
+# 触发：定时巡检上游 + 手动触发
+# 产物：ghcr.io/<你的用户名>/workbuddy2api-panel，tag = latest / armv7 / sha-xxxxxxx
+
+on:
+#  schedule:
+#    - cron: "23 */6 * * *"   # 每 6 小时检查一次上游；想更快改成 */2 或 */1
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: docker-armv7
+  cancel-in-progress: false
+
+env:
+  UPSTREAM: misakano7545/workbuddy2api-panel
+  IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout 上游源码
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ env.UPSTREAM }}
+          ref: main
+
+      - name: 记录上游版本
+        id: up
+        run: |
+          echo "sha=$(git rev-parse --short=7 HEAD)" >> "$GITHUB_OUTPUT"
+          echo "ver=$(TZ=Asia/Shanghai date +%Y.%-m.%-d.%-H%M)" >> "$GITHUB_OUTPUT"
+
+      - name: 安装 QEMU（arm 32 位）
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm
+
+      - name: 安装 Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: 该版本已构建过就跳过
+        id: chk
+        run: |
+          if docker buildx imagetools inspect "${IMAGE}:sha-${{ steps.up.outputs.sha }}" >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: 登录 GHCR
+        if: steps.chk.outputs.skip == 'false'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push（仅 linux/arm/v7）
+        if: steps.chk.outputs.skip == 'false'
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/arm/v7
+          build-args: |
+            APP_VERSION=${{ steps.up.outputs.ver }}
+          push: true
+          tags: |
+            ${{ env.IMAGE }}:latest
+            ${{ env.IMAGE }}:armv7
+            ${{ env.IMAGE }}:sha-${{ steps.up.outputs.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          # 关闭 provenance attestation：避免 ghcr 页面出现 unknown/unknown 架构条目
+          provenance: false
