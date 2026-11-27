@@ -82,3 +82,15 @@ jobs:
           cache-to: type=gha,mode=max
           # 关闭 provenance attestation：避免 ghcr 页面出现 unknown/unknown 架构条目
           provenance: false
+          
+      - name: 清理 GHCR 旧版本（保留最近 1 个）
+        if: steps.chk.outputs.skip == 'false'
+        uses: actions/delete-package-versions@v5
+        with:
+          # 必须与镜像名一致：ghcr.io/<owner>/workbuddy2api-panel → workbuddy2api-panel
+          package-name: workbuddy2api-panel
+          package-type: container
+          min-versions-to-keep: 1
+          # 安全网：名字命中 latest / armv7 的版本永不删除
+          ignore-versions: '^(latest|armv7)$'
+          token: ${{ secrets.GITHUB_TOKEN }}
